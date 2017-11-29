@@ -8,11 +8,12 @@ from unittest import mock
 import pytest
 #from simple_salesforce import Salesforce
 
-from src.convert_activity_histories import _group_results_by_subject
+from convert_activity_histories import _group_results_by_subject
 
 
 NUMBER_OF_RECORDS = 5
 
+# OrderedDicts are expected type
 ungrouped_result_dicts = [
     OrderedDict([
         ("Subject", "← Email: Recommendations"),
@@ -54,9 +55,9 @@ def mock_connection():
 
 class TestActivityHistoryUpload():
 
-    @pytest.mark.paremetrize("results_list", ungrouped_result_dicts)
-    def test_make_subject_groups(self):
-        grouped_dicts = _group_results_by_subject(ungrouped_result_dicts)
+    @pytest.mark.parametrize("results_list", [ungrouped_result_dicts])
+    def test_make_subject_groups(self, results_list):
+        grouped_dicts = _group_results_by_subject(results_list)
         assert len(grouped_dicts) == 2
 
         for group in grouped_dicts:
