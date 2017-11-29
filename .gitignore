@@ -10,6 +10,7 @@ activate
 # python
 __pycache__
 *.pyc
+*.egg-info
 
 # secrets
 *secrets*

@@ -1,3 +1,4 @@
+-e git+https://github.com/NobleNetworkCharterSchools/activity-history-conversion.git@93eb903260ffb4ce70340080e72fedf6fa63c6a7#egg=activity_history_conversion
 attrs==17.3.0
 pluggy==0.6.0
 py==1.5.2
