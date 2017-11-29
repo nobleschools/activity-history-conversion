@@ -12,6 +12,8 @@ from datetime import datetime
 from itertools import chain
 from os import path
 
+from fuzzywuzzy import fuzz
+
 from salesforce_fields import contact_note as contact_note_fields
 from salesforce_fields import contact as contact_fields
 from salesforce_utils import (
@@ -21,7 +23,6 @@ from salesforce_utils import (
 )
 from salesforce_utils.constants import CAMPUS_SF_IDS
 from salesforce_utils.constants import COMER
-
 from noble_logging_utils.papertrail_logger import (
     get_logger,
     SF_LOG_LIVE,
@@ -54,6 +55,46 @@ CREATED = "created" # bool
 
 # actions
 CREATE = "create"
+
+SUBJECT_MATCH_THRESHOLD = 100
+
+def convert_activity_histories():
+    pass
+
+def _group_results_by_subject(result_dicts):
+    """Group the result dicts by related (email) Subject.
+
+    Eg. should group together emails with subjects of "Recommendation" and
+    "re: Recommendation", in a separate group from email with subject
+    "School visit".
+
+    :param result_dicts: list of ``simple_salesforce.Salesforce.query``
+        results
+    :return: list of tuples, each containing related result dicts
+    :rtype: list
+    """
+    all_grouped = []
+    with_seen_flag = [[d, 0] for d in result_dicts]
+    for result_pair in with_seen_flag:
+        group = []
+        if result_pair[1] == 1:
+            continue
+        target_subject = result_pair[0]["Subject"]
+        for sample_result in with_seen_flag:
+            if sample_result[1] == 1:
+                continue
+            test_subject = sample_result[0]["Subject"]
+            match_score = fuzz.token_set_ratio(
+                target_subject, sample_result[0]["Subject"]
+            )
+            if match_score == SUBJECT_MATCH_THRESHOLD:
+                group.append(sample_result[0])
+                sample_result[1] = 1
+        result_pair[1] = 1
+        all_grouped.append(group)
+    import pprint; pprint.pprint(all_grouped[0])
+    return all_grouped
+
 
 
 def upload_contact_notes(infile_path, output_dir, sandbox=False):
