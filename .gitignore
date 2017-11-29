@@ -1,0 +1,22 @@
+# input files, reports
+*.zip
+*.csv
+*.xls*
+*.htm*
+
+# env
+activate
+
+# python
+__pycache__
+*.pyc
+
+# secrets
+*secrets*
+
+# pytest
+.cache/
+
+# misc
+*.swp
+.DS_Store
