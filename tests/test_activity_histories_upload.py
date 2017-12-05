@@ -8,21 +8,31 @@ from unittest import mock
 import pytest
 #from simple_salesforce import Salesforce
 
-from convert_activity_histories import _group_results_by_subject
+from convert_activity_histories import (
+    _group_records,
+    _group_records_by_subject,
+)
+from salesforce_fields import activity_history as ah_fields
 
 
 NUMBER_OF_RECORDS = 5
 
 # OrderedDicts are expected type
-ungrouped_result_dicts = [
+ungrouped_record_dicts = [
     OrderedDict([
         ("Subject", "← Email: Recommendations"),
+        ("WhoId", "abc123"),
+        ("ActivityDate", "2017-12-01"),
     ]),
     OrderedDict([
         ("Subject", "← Email: Scholarship question"),
+        ("WhoId", "def456"),
+        ("ActivityDate", "2017-11-01"),
     ]),
     OrderedDict([
         ("Subject", "← Email: Re: Recommendations"),
+        ("WhoId", "abc123"),
+        ("ActivityDate", "2017-12-01"),
     ]),
 ]
 
@@ -55,9 +65,9 @@ def mock_connection():
 
 class TestActivityHistoryUpload():
 
-    @pytest.mark.parametrize("results_list", [ungrouped_result_dicts])
-    def test_make_subject_groups(self, results_list):
-        grouped_dicts = _group_results_by_subject(results_list)
+    @pytest.mark.parametrize("records_list", [ungrouped_record_dicts])
+    def test_make_subject_groups(self, records_list):
+        grouped_dicts = _group_records_by_subject(records_list)
         assert len(grouped_dicts) == 2
 
         for group in grouped_dicts:
@@ -68,3 +78,36 @@ class TestActivityHistoryUpload():
             else:
                 pytest.fail("Response dicts not properly grouped by subject")
 
+
+    @pytest.mark.parametrize("records_list", [ungrouped_record_dicts])
+    def test_group_records_by_whoid(self, records_list):
+        # assumes they'll be sorted
+        key = ah_fields.WHO_ID
+        sorted_ = sorted(records_list, key=lambda x: x[key])
+        grouped_dicts = _group_records(sorted_, key)
+        assert len(grouped_dicts) == 2
+
+        for group in grouped_dicts:
+            if len(group) == 1:
+                assert group[0][key] == "def456"
+            elif len(group) == 2:
+                assert group[0][key] == "abc123"
+            else:
+                pytest.fail("Response dicts not properly grouped by WhoId")
+
+
+    @pytest.mark.parametrize("records_list", [ungrouped_record_dicts])
+    def test_group_records_by_activity_date(self, records_list):
+        # assumes they'll be sorted
+        key = ah_fields.ACTIVITY_DATE
+        sorted_ = sorted(records_list, key=lambda x: x[key])
+        grouped_dicts = _group_records(sorted_, key)
+        assert len(grouped_dicts) == 2
+
+        for group in grouped_dicts:
+            if len(group) == 1:
+                assert group[0][key] == "2017-11-01"
+            elif len(group) == 2:
+                assert group[0][key] == "2017-12-01"
+            else:
+                pytest.fail("Response dicts not properly grouped by ActivityDate")

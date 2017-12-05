@@ -1,8 +1,7 @@
 """
 activity_history_conversion/src/convert_activity_history.py
 
-Define convert_activity_histories function, which creates Contact Notes from
-Activity History and Event Salesforce objects.
+Create Contact Notes from Activity History and Event Salesforce objects.
 
 ...
 """
@@ -14,6 +13,7 @@ from os import path
 
 from fuzzywuzzy import fuzz
 
+from salesforce_fields import activity_history as ah_fields
 from salesforce_fields import contact_note as contact_note_fields
 from salesforce_fields import contact as contact_fields
 from salesforce_utils import (
@@ -21,28 +21,19 @@ from salesforce_utils import (
     make_salesforce_datestr,
     salesforce_gen,
 )
-from salesforce_utils.constants import CAMPUS_SF_IDS
-from salesforce_utils.constants import COMER
+from salesforce_utils.constants import (
+        AC_LOOKUP,
+        CAMPUS_SF_IDS,
+        ROWECLARK,
+)
 from noble_logging_utils.papertrail_logger import (
     get_logger,
     SF_LOG_LIVE,
     SF_LOG_SANDBOX,
 )
 
-COMER_ACCOUNT_ID = CAMPUS_SF_IDS[COMER]
-
-# using data from below headers for Contact Note objects
-NOBLE_CONTACT_SF_ID = "Noble SF ID Contact"
-NOBLE_CONTACT_NOTE_SF_ID = "Noble SF ID Contact Note"
-COMMENTS = "Comments"
-COMM_STATUS = "Communication Status"
-DATE_OF_CONTACT = "Date of Contact"
-DISCUSSION_CATEGORY = "Discussion Category"
-INITIATED_BY_ALUM = "Initiated by alum"
-MODE = "Mode of Communication"
-SUBJECT = "Subject"
-
-COMER_CONTACT_NOTE_SF_ID = "Contact Note: ID"
+ROWECLARK_ACCOUNT_ID = CAMPUS_SF_IDS[ROWECLARK]
+AC_ID = AC_LOOKUP["rc"]
 
 SOURCE_DATESTR_FORMAT = "%m/%d/%Y"
 OUTFILE_DATESTR_FORMAT = "%Y%m%d-%H:%M"
@@ -57,42 +48,181 @@ CREATED = "created" # bool
 CREATE = "create"
 
 SUBJECT_MATCH_THRESHOLD = 100
+ACS_TO_CONVERT = (
+    "", # maluna
+)
 
-def convert_activity_histories():
+def convert_ah_and_events_to_contact_notes(start_date, sandbox=True): # XXX dev
+    """Look for recent Activity History and Event objects and make
+    Contact Notes from them.
+
+    ...
+
+    """
+    global sf_connection
+    sf_connection = get_salesforce_connection(sandbox=sandbox)
+    global logger
+    job_name = __file__.split(path.sep)[-1]
+    hostname = SF_LOG_SANDBOX if sandbox else SF_LOG_LIVE
+    logger = get_logger(job_name, hostname=hostname)
+
+    ## convert_activity_histories()
+
+    ## convert_events()
+
+    ## ..logging..
+
+
+def convert_activity_histories(start_date, sf_connection):
+    """Make Contact Note objects from recent Activity History objects.
+
+    Results must be sorted by WhoID then ActivityDate for object grouping later
+    (grouping objects by contact/WhoId, with a similar subject with a
+    shared ActivityDate).
+
+    :param start_date: str earliest (activity) date from which to convert
+        objects, in SALESFORCE_DATESTRING_FORMAT (%Y-%m-%d)
+    :return: ???
+    """
+    ah_query = (f"""
+        SELECT (
+            SELECT {ah_fields.ID}
+            ,{ah_fields.SUBJECT}
+            ,{ah_fields.CREATED_DATE}
+            ,{ah_fields.WHO_ID}
+            ,{ah_fields.ACTIVITY_DATE}
+            FROM {ah_fields.API_NAME}
+            WHERE IsTask = True
+            AND OwnerId = '{AC_ID}'
+            AND {ah_fields.ACTIVITY_DATE} >= '{start_date}'
+            ORDER BY {ah_fields.WHO_ID}, {ah_fields.ACTIVITY_DATE} ASC
+        )
+        FROM Account WHERE Id = '{ROWECLARK_ACCOUNT_ID}'
+    """)
+    # lookup query results are nested..
+    ah_results = next(salesforce_gen(sf_connection, ah_query))
+    records = ah_results["ActivityHistories"]["records"]
+
+    # pare down by date by subject
+    grouped_by_whoid = _group_records(records, ah_fields.WHO_ID)
+    for whoid_group in grouped_by_whoid:
+        grouped_by_activity_date = _group_records(
+            whoid_group, ah_fields.ACTIVITY_DATE
+        )
+        for activity_date_group in grouped_by_activity_date:
+            grouped_by_subject = _group_records_by_subject(activity_date_group)
+            for final_group in grouped_by_subject:
+                longest = max(
+                    final_group, key=lambda x: len(x[ah_fields.DESCRIPTION])
+                )
+
+
+    resulting_notes = []
+    ah_ids = []
+    for ah_dict in pared_results:
+        ah_ids.append(ah_dict[ah_fields.ID])
+        prepped = _map_ah_to_contact_note(ah_dict)
+        #contact_note = get_or_create_contact_note(prepped)
+        #resulting_notes.append(contact_note)
+
+    _log_results("Activity Histories", resulting_notes, ah_ids)
+
+
+def _map_ah_to_contact_note(result_dict):
+    """From a dict of Activity History data, create a dict of args for a
+    (new) Contact Note.
+
+    :param result_dict: dict of Activity History data, expecting the below
+        key names and value types:
+            ah_fields.ID: str
+            ah_fields.WHO_ID: str
+            ah_fields.SUBJECT: str
+            ah_fields.DESCRIPTION: str
+            ah_fields.CREATED_DATE: str
+    :return: dict of Contact Note data, keyed by Salesforce API names
+    :rtype: dict
+    """
+
+    # Mode_of_Communication__c = "Email"
+    # Contact__c --> whoID
+    # Subject__c --> Subject !!! could be None
+    # Comments__c --> description (rolled up)
+    # Date_of_Communication --> CreatedDate?
+
+
+def convert_events():
+    """Make Contact Note objects from recent Event objects.
+
+    ...
+
+    """
     pass
 
-def _group_results_by_subject(result_dicts):
-    """Group the result dicts by related (email) Subject.
+
+def _group_records(record_dicts, key):
+    """Group the record dicts by the value of the passed key arg, so that each
+    sub-list returned is a list of dicts with the same value.
+
+    :param record_dicts: list of ``simple_salesforce.Salesforce.query`` result
+        record dicts
+    :param key: str key by which to group. Should be one of
+        ah_fields.WHO_ID
+        ah_fields.ACTIVITY_DATE
+    :return: list of lists, where the dicts in each sub-list share the same key
+    :rtype: list
+    """
+    grouped = []
+
+    current_value = None
+    current_value_group = []
+    for record in record_dicts:
+        value = record[key]
+        if not current_value:
+            current_value = value
+        elif value is not current_value:
+            grouped.append(current_value_group)
+            current_value = value
+            current_value_group = []
+
+        current_value_group.append(record)
+    grouped.append(current_value_group)
+
+    return grouped
+
+
+def _group_records_by_subject(records_list):
+    """Group the record dicts by related (email) Subject.
 
     Eg. should group together emails with subjects of "Recommendation" and
     "re: Recommendation", in a separate group from email with subject
     "School visit".
 
-    :param result_dicts: list of ``simple_salesforce.Salesforce.query``
-        results
-    :return: list of tuples, each containing related result dicts
+    :param records_list: list of ``simple_salesforce.Salesforce.query``
+        result dicts, assumed to be related to the same Contact and from the
+        same time period (eg. ActivityDate)
+    :return: list of lists, where each sub-list contains record dicts with
+        like subjects
     :rtype: list
     """
     all_grouped = []
-    with_seen_flag = [[d, 0] for d in result_dicts]
+    with_seen_flag = [[d, 0] for d in records_list]
     for result_pair in with_seen_flag:
         group = []
         if result_pair[1] == 1:
             continue
         target_subject = result_pair[0]["Subject"]
-        for sample_result in with_seen_flag:
-            if sample_result[1] == 1:
+        for other_result in with_seen_flag:
+            if other_result[1] == 1:
                 continue
-            test_subject = sample_result[0]["Subject"]
             match_score = fuzz.token_set_ratio(
-                target_subject, sample_result[0]["Subject"]
+                target_subject, other_result[0]["Subject"]
             )
             if match_score == SUBJECT_MATCH_THRESHOLD:
-                group.append(sample_result[0])
-                sample_result[1] = 1
+                group.append(other_result[0])
+                other_result[1] = 1
         result_pair[1] = 1
         all_grouped.append(group)
-    import pprint; pprint.pprint(all_grouped[0])
+
     return all_grouped
 
 
