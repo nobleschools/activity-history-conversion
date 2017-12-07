@@ -22,17 +22,17 @@ ungrouped_record_dicts = [
     OrderedDict([
         ("Subject", "← Email: Recommendations"),
         ("WhoId", "abc123"),
-        ("ActivityDate", "2017-12-01"),
+        ("CreatedDate", "2017-12-01"),
     ]),
     OrderedDict([
         ("Subject", "← Email: Scholarship question"),
         ("WhoId", "def456"),
-        ("ActivityDate", "2017-11-01"),
+        ("CreatedDate", "2017-11-01"),
     ]),
     OrderedDict([
         ("Subject", "← Email: Re: Recommendations"),
         ("WhoId", "abc123"),
-        ("ActivityDate", "2017-12-01"),
+        ("CreatedDate", "2017-12-01"),
     ]),
 ]
 
@@ -81,33 +81,35 @@ class TestActivityHistoryUpload():
 
     @pytest.mark.parametrize("records_list", [ungrouped_record_dicts])
     def test_group_records_by_whoid(self, records_list):
-        # assumes they'll be sorted
-        key = ah_fields.WHO_ID
-        sorted_ = sorted(records_list, key=lambda x: x[key])
-        grouped_dicts = _group_records(sorted_, key)
+        key_func = lambda x: x[ah_fields.WHO_ID]
+        # _group_records expects they'll be sorted by key in question
+        sorted_ = sorted(records_list, key=lambda x: x[ah_fields.WHO_ID])
+
+        grouped_dicts = _group_records(sorted_, key_func)
         assert len(grouped_dicts) == 2
 
         for group in grouped_dicts:
             if len(group) == 1:
-                assert group[0][key] == "def456"
+                assert key_func(group[0]) == "def456"
             elif len(group) == 2:
-                assert group[0][key] == "abc123"
+                assert key_func(group[0]) == "abc123"
             else:
                 pytest.fail("Response dicts not properly grouped by WhoId")
 
 
     @pytest.mark.parametrize("records_list", [ungrouped_record_dicts])
-    def test_group_records_by_activity_date(self, records_list):
-        # assumes they'll be sorted
-        key = ah_fields.ACTIVITY_DATE
-        sorted_ = sorted(records_list, key=lambda x: x[key])
-        grouped_dicts = _group_records(sorted_, key)
+    def test_group_records_by_created_date(self, records_list):
+        key_func = lambda x: x[ah_fields.CREATED_DATE][:10]
+        # _group_records expects they'll be sorted by key in question
+        sorted_ = sorted(records_list, key=lambda x: x[ah_fields.CREATED_DATE])
+
+        grouped_dicts = _group_records(sorted_, key_func)
         assert len(grouped_dicts) == 2
 
         for group in grouped_dicts:
             if len(group) == 1:
-                assert group[0][key] == "2017-11-01"
+                assert key_func(group[0]) == "2017-11-01"
             elif len(group) == 2:
-                assert group[0][key] == "2017-12-01"
+                assert key_func(group[0]) == "2017-12-01"
             else:
-                pytest.fail("Response dicts not properly grouped by ActivityDate")
+                pytest.fail("Response dicts not properly grouped by CreatedDate")
