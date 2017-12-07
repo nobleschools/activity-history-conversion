@@ -7,16 +7,22 @@ Create Contact Notes from Activity History and Event Salesforce objects.
 """
 
 import csv
-from datetime import datetime
+from datetime import (
+    datetime,
+    timedelta,
+)
 from itertools import chain
 from os import path
+import re
 
 from fuzzywuzzy import fuzz
+import pytz
 
 from salesforce_fields import activity_history as ah_fields
-from salesforce_fields import contact_note as contact_note_fields
+from salesforce_fields import contact_note as cn_fields
 from salesforce_fields import contact as contact_fields
 from salesforce_utils import (
+    get_or_create_contact_note,
     get_salesforce_connection,
     make_salesforce_datestr,
     salesforce_gen,
@@ -25,6 +31,7 @@ from salesforce_utils.constants import (
         AC_LOOKUP,
         CAMPUS_SF_IDS,
         ROWECLARK,
+        SALESFORCE_DATETIME_FORMAT,
 )
 from noble_logging_utils.papertrail_logger import (
     get_logger,
@@ -32,8 +39,15 @@ from noble_logging_utils.papertrail_logger import (
     SF_LOG_SANDBOX,
 )
 
+
+
+from pprint import pprint # XXX dev
+
+
+DAYS_BACK = 1 # convert objects from last DAYS_BACK days
+
 ROWECLARK_ACCOUNT_ID = CAMPUS_SF_IDS[ROWECLARK]
-AC_ID = AC_LOOKUP["rc"]
+AC_ID = AC_LOOKUP["rc"][0]
 
 SOURCE_DATESTR_FORMAT = "%m/%d/%Y"
 OUTFILE_DATESTR_FORMAT = "%Y%m%d-%H:%M"
@@ -52,7 +66,10 @@ ACS_TO_CONVERT = (
     "", # maluna
 )
 
-def convert_ah_and_events_to_contact_notes(start_date, sandbox=True): # XXX dev
+NEWLINE_RE = re.compile("^\s*\n+", re.MULTILINE)
+
+
+def convert_ah_and_events_to_contact_notes(sandbox=False): # XXX dev
     """Look for recent Activity History and Event objects and make
     Contact Notes from them.
 
@@ -63,76 +80,92 @@ def convert_ah_and_events_to_contact_notes(start_date, sandbox=True): # XXX dev
     sf_connection = get_salesforce_connection(sandbox=sandbox)
     global logger
     job_name = __file__.split(path.sep)[-1]
-    hostname = SF_LOG_SANDBOX if sandbox else SF_LOG_LIVE
-    logger = get_logger(job_name, hostname=hostname)
+    system_name = SF_LOG_SANDBOX if sandbox else SF_LOG_LIVE
+    logger = get_logger(job_name, hostname=system_name)
 
-    ## convert_activity_histories()
+    today = datetime.today()
+    today_utc = today.astimezone(pytz.utc)
+    start_date = today_utc - timedelta(days=DAYS_BACK)
+    start_datestr = datetime.strftime(start_date, SALESFORCE_DATETIME_FORMAT)
+
+    convert_activity_histories(sf_connection, start_datestr)
 
     ## convert_events()
 
     ## ..logging..
 
 
-def convert_activity_histories(start_date, sf_connection):
+def convert_activity_histories(sf_connection, start_date):
     """Make Contact Note objects from recent Activity History objects.
 
-    Results must be sorted by WhoID then ActivityDate for object grouping later
+    Results must be sorted by WhoID then CreatedDate for object grouping later
     (grouping objects by contact/WhoId, with a similar subject with a
-    shared ActivityDate).
+    shared CreatedDate).
 
-    :param start_date: str earliest (activity) date from which to convert
-        objects, in SALESFORCE_DATESTRING_FORMAT (%Y-%m-%d)
+    :param start_date: str earliest (created) date from which to convert
+        objects, in SALESFORCE_DATETIME_FORMAT (%Y-%m-%dT%H:%M:%S.%f%z)
     :return: ???
     """
-    ah_query = (f"""
-        SELECT (
-            SELECT {ah_fields.ID}
-            ,{ah_fields.SUBJECT}
-            ,{ah_fields.CREATED_DATE}
-            ,{ah_fields.WHO_ID}
-            ,{ah_fields.ACTIVITY_DATE}
-            FROM {ah_fields.API_NAME}
-            WHERE IsTask = True
-            AND OwnerId = '{AC_ID}'
-            AND {ah_fields.ACTIVITY_DATE} >= '{start_date}'
-            ORDER BY {ah_fields.WHO_ID}, {ah_fields.ACTIVITY_DATE} ASC
-        )
-        FROM Account WHERE Id = '{ROWECLARK_ACCOUNT_ID}'
-    """)
+    ah_query = (
+        f"SELECT ( "
+            f"SELECT {ah_fields.ID} "
+            f",{ah_fields.SUBJECT} "
+            f",{ah_fields.CREATED_DATE} "
+            f",{ah_fields.WHO_ID} "
+            f",{ah_fields.DESCRIPTION} "
+            f"FROM {ah_fields.API_NAME} "
+            f"WHERE IsTask = True "
+            f"AND OwnerId = '{AC_ID}' "
+            f"AND {ah_fields.CREATED_DATE} >= {start_date} "
+            f"ORDER BY {ah_fields.WHO_ID}, {ah_fields.CREATED_DATE} ASC "
+        f") "
+        f"FROM Account WHERE Id = '{ROWECLARK_ACCOUNT_ID}' "
+    )
     # lookup query results are nested..
     ah_results = next(salesforce_gen(sf_connection, ah_query))
+    if not ah_results["ActivityHistories"]:
+        logger.info(f"No ActivityHistory objects created after {start_date}")
+        return
+
     records = ah_results["ActivityHistories"]["records"]
-
-    # pare down by date by subject
-    grouped_by_whoid = _group_records(records, ah_fields.WHO_ID)
-    for whoid_group in grouped_by_whoid:
-        grouped_by_activity_date = _group_records(
-            whoid_group, ah_fields.ACTIVITY_DATE
-        )
-        for activity_date_group in grouped_by_activity_date:
-            grouped_by_subject = _group_records_by_subject(activity_date_group)
-            for final_group in grouped_by_subject:
-                longest = max(
-                    final_group, key=lambda x: len(x[ah_fields.DESCRIPTION])
-                )
-
-
     resulting_notes = []
     ah_ids = []
-    for ah_dict in pared_results:
-        ah_ids.append(ah_dict[ah_fields.ID])
-        prepped = _map_ah_to_contact_note(ah_dict)
-        #contact_note = get_or_create_contact_note(prepped)
-        #resulting_notes.append(contact_note)
+    # group down by alum contact, then date
+    grouped_by_whoid = _group_records(records, lambda x: x[ah_fields.WHO_ID])
+    for whoid_group in grouped_by_whoid:
+        grouped_by_created_date = _group_records(
+            whoid_group, lambda x: x[ah_fields.CREATED_DATE][:10]
+        )
+        for created_date_group in grouped_by_created_date:
+            grouped_by_subject = _group_records_by_subject(created_date_group)
+            for subject_group in grouped_by_subject:
+                # assuming longest email in a group with matching Subject
+                # fields contains whole of transaction
+                # from that day, upload as Contact Note
+                longest = max(
+                    subject_group, key=lambda x: len(x[ah_fields.DESCRIPTION])
+                )
+                ah_ids.append(longest[ah_fields.ID])
+                prepped = _map_ah_to_contact_note(longest)
+                pprint(prepped)
+                result_dict = get_or_create_contact_note(sf_connection, prepped)
+                if result_dict[SUCCESS]:
+                    result_dict[CREATED] = True
+                else:
+                    result_dict[CREATED] = False
+                resulting_notes.append(result_dict)
 
-    _log_results("Activity Histories", resulting_notes, ah_ids)
+    _log_results("Activity History", resulting_notes, ah_ids)
 
 
-def _map_ah_to_contact_note(result_dict):
+def _map_ah_to_contact_note(ah_record_dict):
     """From a dict of Activity History data, create a dict of args for a
     (new) Contact Note.
 
-    :param result_dict: dict of Activity History data, expecting the below
+    Does some cleaning of the data as well:
+        - replace \n(\n)+ with \n in the Description/Comments__c field
+
+    :param ah_record_dict: dict of Activity History data, expecting the below
         key names and value types:
             ah_fields.ID: str
             ah_fields.WHO_ID: str
@@ -142,12 +175,21 @@ def _map_ah_to_contact_note(result_dict):
     :return: dict of Contact Note data, keyed by Salesforce API names
     :rtype: dict
     """
+    ah_id = ah_record_dict[ah_fields.ID]
+    #description = ah_record_dict[ah_fields.DESCRIPTION][:100] # XXX dev
+    ## strip out instances of >2 '\n' in a row
+    description = NEWLINE_RE.sub(
+        "\n", ah_record_dict[ah_fields.DESCRIPTION]
+    )
+    cn_dict = {
+        cn_fields.MODE_OF_COMMUNICATION: "Email",
+        cn_fields.CONTACT: ah_record_dict[ah_fields.WHO_ID],
+        cn_fields.SUBJECT: ah_record_dict[ah_fields.SUBJECT],
+        cn_fields.DATE_OF_CONTACT: ah_record_dict[ah_fields.CREATED_DATE],
+        cn_fields.COMMENTS: f"{description}\n\n///Created from AH {ah_id}",
+    }
 
-    # Mode_of_Communication__c = "Email"
-    # Contact__c --> whoID
-    # Subject__c --> Subject !!! could be None
-    # Comments__c --> description (rolled up)
-    # Date_of_Communication --> CreatedDate?
+    return cn_dict
 
 
 def convert_events():
@@ -159,35 +201,34 @@ def convert_events():
     pass
 
 
-def _group_records(record_dicts, key):
-    """Group the record dicts by the value of the passed key arg, so that each
-    sub-list returned is a list of dicts with the same value.
+def _group_records(records_list, key_func):
+    """Group the record dicts by the value of applying the passed key_func arg
+    to each record in records_list.
 
-    :param record_dicts: list of ``simple_salesforce.Salesforce.query`` result
+    :param records_list: list of ``simple_salesforce.Salesforce.query`` result
         record dicts
-    :param key: str key by which to group. Should be one of
-        ah_fields.WHO_ID
-        ah_fields.ACTIVITY_DATE
-    :return: list of lists, where the dicts in each sub-list share the same key
+    :param key_func: func key to get value by which to group
+    :return: list of lists, where the dicts in each sub-list share the same
+        key_func value
     :rtype: list
     """
-    grouped = []
+    all_groups = []
 
-    current_value = None
-    current_value_group = []
-    for record in record_dicts:
-        value = record[key]
-        if not current_value:
-            current_value = value
-        elif value is not current_value:
-            grouped.append(current_value_group)
-            current_value = value
-            current_value_group = []
+    group_value = None
+    sub_group = []
+    for record in records_list:
+        current_value = key_func(record)
+        if not group_value:
+            group_value = current_value
+        elif current_value != group_value:
+            all_groups.append(sub_group)
+            group_value = current_value
+            sub_group = []
 
-        current_value_group.append(record)
-    grouped.append(current_value_group)
+        sub_group.append(record)
+    all_groups.append(sub_group)
 
-    return grouped
+    return all_groups
 
 
 def _group_records_by_subject(records_list):
@@ -199,15 +240,15 @@ def _group_records_by_subject(records_list):
 
     :param records_list: list of ``simple_salesforce.Salesforce.query``
         result dicts, assumed to be related to the same Contact and from the
-        same time period (eg. ActivityDate)
+        same time period (eg. CreatedDate)
     :return: list of lists, where each sub-list contains record dicts with
         like subjects
     :rtype: list
     """
-    all_grouped = []
+    all_groups = []
     with_seen_flag = [[d, 0] for d in records_list]
     for result_pair in with_seen_flag:
-        group = []
+        sub_group = []
         if result_pair[1] == 1:
             continue
         target_subject = result_pair[0]["Subject"]
@@ -218,12 +259,12 @@ def _group_records_by_subject(records_list):
                 target_subject, other_result[0]["Subject"]
             )
             if match_score == SUBJECT_MATCH_THRESHOLD:
-                group.append(other_result[0])
+                sub_group.append(other_result[0])
                 other_result[1] = 1
         result_pair[1] = 1
-        all_grouped.append(group)
+        all_groups.append(sub_group)
 
-    return all_grouped
+    return all_groups
 
 
 
@@ -320,76 +361,7 @@ def _save_created_report(results_list, output_dir, args_dicts):
     return file_path
 
 
-def _create_contact_notes(data_dicts):
-    """Create new Contact Notes after converting row to Salesforce-ready data
-    dicts, and add Comer's 'Contact Note: ID' to the results.
-
-    First checks for existing Notes with the same Contact (alum), Date of
-    Contact, and Subject, and skip if one is found.
-
-    The returned results format should otherwise mimic the format returned by
-    ``simple-salesforce.Salesforce.bulk`` operations; ie. the following keys:
-        - 'id'
-        - 'success'
-        - 'errors'
-        - 'created'
-        - COMER_CONTACT_NOTE_SF_ID
-
-    :param data_dicts: iterable of dictionaries to create
-    :return: list of results dicts
-    :rtype: list
-    """
-    results = []
-    for contact_note_dict in data_dicts:
-        comer_id = contact_note_dict[COMER_CONTACT_NOTE_SF_ID]
-        salesforce_ready = _prep_row_for_salesforce(contact_note_dict)
-        result = get_or_create_note(salesforce_ready)
-        # not added by non-bulk `create` call
-        if result[SUCCESS]:
-            result[CREATED] = True
-        else:
-            result[CREATED] = False
-        result[COMER_CONTACT_NOTE_SF_ID] = comer_id
-        results.append(result)
-
-    _log_results(results, CREATE, data_dicts)
-    return results
-
-
-def get_or_create_note(contact_note_dict):
-    """Look for an existing Contact Note with the same Contact, Subject, and
-    Date of Contact fields. Return that if exists, otherwise create.
-
-    :param contact_note_dict: dictionary of Contact Note details, with keys
-        already mapped to Salesforce API fieldnames and dates API-ready
-    :return: results dict (keys 'id', 'success', 'errors')
-    :rtype: dict
-    """
-    alum_sf_id = contact_note_dict[contact_note_fields.CONTACT]
-    subject = contact_note_dict[contact_note_fields.SUBJECT]
-    date_of_contact = contact_note_dict[contact_note_fields.DATE_OF_CONTACT]
-    contact_note_query = (
-        f"SELECT {contact_note_fields.ID} "
-        f"FROM {contact_note_fields.API_NAME} "
-        f"WHERE {contact_note_fields.CONTACT} = '{alum_sf_id}' "
-        f"AND {contact_note_fields.SUBJECT} = '{subject}' "
-        f"AND {contact_note_fields.DATE_OF_CONTACT} = {date_of_contact} "
-    )
-
-    results = sf_connection.query(contact_note_query)
-    if results["totalSize"]:
-        # doesn't matter if more than one
-        existing_sf_id = results["records"][0]["Id"]
-        return {
-            ID_RESULT: existing_sf_id,
-            SUCCESS: False,
-            ERRORS: [f"Found conflicting Contact Note {existing_sf_id}",],
-        }
-
-    return sf_connection.Contact_Note__c.create(contact_note_dict)
-
-
-def _log_results(results_list, action, original_data):
+def _log_results(original_object_name, results_list, original_data):
     """Log results from Contact Note create action.
 
     Log results from create_contact_notes. Input results_list structured as
@@ -401,20 +373,22 @@ def _log_results(results_list, action, original_data):
         - created
         - errors
 
+    :param original_object_name: str name of object type converted
     :param results_list: list of result dicts, mimicking
         ``simple_salesfoce.Salesforce.bulk`` result
-    :param action: str action taken ('create', 'update', 'delete')
     :param original_data: list of original data dicts from the input file
     :rtype: None
     """
-    logger.info(f"Logging results of bulk Contact Note {action} operation..")
+    logger.info(
+        f"Logging results of {original_object_name} to Contact Note conversion.."
+    )
     attempted = success_count = fail_count = 0
     for result, args_dict in zip(results_list, original_data):
         attempted += 1
         if not result[SUCCESS]:
             fail_count += 1
             log_payload = {
-                "action": action,
+                "from_object": original_object_name,
                 ID_RESULT: result[ID_RESULT],
                 ERRORS: result[ERRORS],
                 "arguments": args_dict,
@@ -422,7 +396,7 @@ def _log_results(results_list, action, original_data):
             logger.warn(f"Possible duplicate Contact Note: {log_payload}")
         else:
             success_count += 1
-            logger.info(f"Successful Contact Note {action}: {result['id']}")
+            logger.info(f"Contact Note created: {result['id']}")
 
     logger.info(
         f"Contact Note {action}: {attempted} attempted, "
