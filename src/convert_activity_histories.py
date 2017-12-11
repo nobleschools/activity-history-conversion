@@ -20,7 +20,6 @@ import pytz
 
 from salesforce_fields import activity_history as ah_fields
 from salesforce_fields import contact_note as cn_fields
-from salesforce_fields import contact as contact_fields
 from salesforce_utils import (
     get_or_create_contact_note,
     get_salesforce_connection,
@@ -92,7 +91,6 @@ def convert_ah_and_events_to_contact_notes(sandbox=False): # XXX dev
 
     ## convert_events()
 
-    ## ..logging..
 
 
 def convert_activity_histories(sf_connection, start_date):
@@ -115,8 +113,10 @@ def convert_activity_histories(sf_connection, start_date):
             f",{ah_fields.DESCRIPTION} "
             f"FROM {ah_fields.API_NAME} "
             f"WHERE IsTask = True "
-            f"AND OwnerId = '{AC_ID}' "
+            f"AND {ah_fields.OWNER_ID} = '{AC_ID}' "
             f"AND {ah_fields.CREATED_DATE} >= {start_date} "
+            #f"AND {ah_fields.CREATED_DATE} >= 2013-01-01T00:00:00+0000 " # XXX dev
+            #f"AND {ah_fields.CREATED_DATE} < 2014-01-01T00:00:00+0000 " # XXX dev
             f"ORDER BY {ah_fields.WHO_ID}, {ah_fields.CREATED_DATE} ASC "
         f") "
         f"FROM Account WHERE Id = '{ROWECLARK_ACCOUNT_ID}' "
@@ -139,15 +139,17 @@ def convert_activity_histories(sf_connection, start_date):
         for created_date_group in grouped_by_created_date:
             grouped_by_subject = _group_records_by_subject(created_date_group)
             for subject_group in grouped_by_subject:
+                if not subject_group: # TODO handle upstream
+                    continue
                 # assuming longest email in a group with matching Subject
                 # fields contains whole of transaction
                 # from that day, upload as Contact Note
                 longest = max(
                     subject_group, key=lambda x: len(x[ah_fields.DESCRIPTION])
                 )
-                ah_ids.append(longest[ah_fields.ID])
+                ah_ids.append({"Id": longest[ah_fields.ID]})
                 prepped = _map_ah_to_contact_note(longest)
-                pprint(prepped)
+                #pprint(prepped)
                 result_dict = get_or_create_contact_note(sf_connection, prepped)
                 if result_dict[SUCCESS]:
                     result_dict[CREATED] = True
@@ -163,7 +165,8 @@ def _map_ah_to_contact_note(ah_record_dict):
     (new) Contact Note.
 
     Does some cleaning of the data as well:
-        - replace \n(\n)+ with \n in the Description/Comments__c field
+        - replace \n(\n)+ with \n in the Description/Comments__c field to
+          cut out large swaths of empty space
 
     :param ah_record_dict: dict of Activity History data, expecting the below
         key names and value types:
@@ -177,16 +180,19 @@ def _map_ah_to_contact_note(ah_record_dict):
     """
     ah_id = ah_record_dict[ah_fields.ID]
     #description = ah_record_dict[ah_fields.DESCRIPTION][:100] # XXX dev
-    ## strip out instances of >2 '\n' in a row
+    # strip out instances of >2 '\n' in a row for nicer formatting
     description = NEWLINE_RE.sub(
         "\n", ah_record_dict[ah_fields.DESCRIPTION]
     )
+    # escape apostrophes for SF query
     cn_dict = {
         cn_fields.MODE_OF_COMMUNICATION: "Email",
         cn_fields.CONTACT: ah_record_dict[ah_fields.WHO_ID],
         cn_fields.SUBJECT: ah_record_dict[ah_fields.SUBJECT],
-        cn_fields.DATE_OF_CONTACT: ah_record_dict[ah_fields.CREATED_DATE],
-        cn_fields.COMMENTS: f"{description}\n\n///Created from AH {ah_id}",
+        # send YYYY-MM-DD
+        cn_fields.DATE_OF_CONTACT: ah_record_dict[ah_fields.CREATED_DATE][:10],
+        cn_fields.COMMENTS:\
+            f"{description}\n\n///Created from ActivityHistory {ah_id}"
     }
 
     return cn_dict
@@ -199,6 +205,21 @@ def convert_events():
 
     """
     pass
+    events_query = (
+        f"SELECT {event_fields.ID} "
+        f",{event_fields.OWNER_ID} " # Rowe-Clark Coordinator; Event.Assigned To
+        f",{event_fields.WHO_ID} " # Contact (alum) SFID; Event.Name; --> Contact__c
+        f",{event_fields.SUBJECT} " # --> Subject__c
+        f",{event_fields.DESCRIPTION} " # --> Comments__c
+        f",{event_fields.START_DATETIME} " # --> Date_of_Contact__c
+        f"FROM {event_fields.API_NAME} "
+        f"WHERE OwnerId = '{AC_ID}' " # Rowe-Clark Coordinator
+    )
+
+
+    # prep_for_sf ... description could be None
+
+
 
 
 def _group_records(records_list, key_func):
@@ -396,11 +417,15 @@ def _log_results(original_object_name, results_list, original_data):
             logger.warn(f"Possible duplicate Contact Note: {log_payload}")
         else:
             success_count += 1
-            logger.info(f"Contact Note created: {result['id']}")
+            logger.info(
+                f"Contact Note {result['id']} created from "
+                f"{original_object_name} {args_dict['Id']}"
+            )
 
     logger.info(
-        f"Contact Note {action}: {attempted} attempted, "
-        f"{success_count} succeeded, {fail_count} failed."
+        f"{original_object_name} to Contact Note conversion: "
+        f"{attempted} attempted, {success_count} succeeded, "
+        f"{fail_count} failed."
     )
 
 
