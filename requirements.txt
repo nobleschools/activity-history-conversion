@@ -1,4 +1,4 @@
--e git+https://github.com/NobleNetworkCharterSchools/activity-history-conversion.git@0bf73a6eb1d84b9c2ebf9ed39e0ebdecab2172df#egg=activity_history_conversion
+-e git+https://github.com/NobleNetworkCharterSchools/activity-history-conversion.git@27f5bfd0d92f2415b5c34a0cd26366bf2f4fe26c#egg=activity_history_conversion
 asn1crypto==0.23.0
 attrs==17.3.0
 certifi==2017.11.5
