@@ -6,12 +6,10 @@ Create Contact Notes from Activity History and Event Salesforce objects.
 ...
 """
 
-import csv
 from datetime import (
     datetime,
     timedelta,
 )
-from itertools import chain
 from os import path
 import re
 
@@ -20,10 +18,10 @@ import pytz
 
 from salesforce_fields import activity_history as ah_fields
 from salesforce_fields import contact_note as cn_fields
+from salesforce_fields import event as event_fields
 from salesforce_utils import (
     get_or_create_contact_note,
     get_salesforce_connection,
-    make_salesforce_datestr,
     salesforce_gen,
 )
 from salesforce_utils.constants import (
@@ -38,45 +36,38 @@ from noble_logging_utils.papertrail_logger import (
     SF_LOG_SANDBOX,
 )
 
-
-
 from pprint import pprint # XXX dev
 
 
 DAYS_BACK = 1 # convert objects from last DAYS_BACK days
 
 ROWECLARK_ACCOUNT_ID = CAMPUS_SF_IDS[ROWECLARK]
-AC_ID = AC_LOOKUP["rc"][0]
-
-SOURCE_DATESTR_FORMAT = "%m/%d/%Y"
-OUTFILE_DATESTR_FORMAT = "%Y%m%d-%H:%M"
+AC_ID = AC_LOOKUP["rc"][0] # Rowe-Clark Coordinator
 
 # simple_salesforce.Salesfoce.bulk operation result keys
-SUCCESS = "success" # bool
-ERRORS = "errors"   # list
-ID_RESULT = "id"    # str safe id
-CREATED = "created" # bool
-
-# actions
-CREATE = "create"
+SUCCESS = "success" # :bool
+CREATED = "created" # :bool
 
 SUBJECT_MATCH_THRESHOLD = 100
-ACS_TO_CONVERT = (
-    "", # maluna
-)
 
 NEWLINE_RE = re.compile("^\s*\n+", re.MULTILINE)
 
 
-def convert_ah_and_events_to_contact_notes(sandbox=False): # XXX dev
+def convert_ah_and_events_to_contact_notes(sandbox=False):
     """Look for recent Activity History and Event objects and make
     Contact Notes from them.
 
-    ...
+    Both conversion operations check for existing notes, and skip creation
+    where potential duplicates are found.
 
+    :param sandbox: bool if True, uses a connection to the configured
+        sandbox Salesforce instance. Defaults to False
+    :return: None
+    :rtype: None
     """
     global sf_connection
     sf_connection = get_salesforce_connection(sandbox=sandbox)
+
     global logger
     job_name = __file__.split(path.sep)[-1]
     system_name = SF_LOG_SANDBOX if sandbox else SF_LOG_LIVE
@@ -88,8 +79,7 @@ def convert_ah_and_events_to_contact_notes(sandbox=False): # XXX dev
     start_datestr = datetime.strftime(start_date, SALESFORCE_DATETIME_FORMAT)
 
     convert_activity_histories(sf_connection, start_datestr)
-
-    ## convert_events()
+    convert_events(sf_connection, start_datestr)
 
 
 
@@ -100,9 +90,11 @@ def convert_activity_histories(sf_connection, start_date):
     (grouping objects by contact/WhoId, with a similar subject with a
     shared CreatedDate).
 
+    :param sf_connection: ``simple_salesforce.Salesforce`` connection
     :param start_date: str earliest (created) date from which to convert
         objects, in SALESFORCE_DATETIME_FORMAT (%Y-%m-%dT%H:%M:%S.%f%z)
-    :return: ???
+    :return: None
+    :rtype: None
     """
     ah_query = (
         f"SELECT ( "
@@ -114,22 +106,22 @@ def convert_activity_histories(sf_connection, start_date):
             f"FROM {ah_fields.API_NAME} "
             f"WHERE IsTask = True "
             f"AND {ah_fields.OWNER_ID} = '{AC_ID}' "
+            f"AND {ah_fields.WHO_ID} != NULL "
             f"AND {ah_fields.CREATED_DATE} >= {start_date} "
-            #f"AND {ah_fields.CREATED_DATE} >= 2013-01-01T00:00:00+0000 " # XXX dev
-            #f"AND {ah_fields.CREATED_DATE} < 2014-01-01T00:00:00+0000 " # XXX dev
             f"ORDER BY {ah_fields.WHO_ID}, {ah_fields.CREATED_DATE} ASC "
         f") "
         f"FROM Account WHERE Id = '{ROWECLARK_ACCOUNT_ID}' "
     )
     # lookup query results are nested..
     ah_results = next(salesforce_gen(sf_connection, ah_query))
+    resulting_notes = []
+    ah_ids = []
+
     if not ah_results["ActivityHistories"]:
-        logger.info(f"No ActivityHistory objects created after {start_date}")
+        _log_results("Activity History", resulting_notes, ah_ids)
         return
 
     records = ah_results["ActivityHistories"]["records"]
-    resulting_notes = []
-    ah_ids = []
     # group down by alum contact, then date
     grouped_by_whoid = _group_records(records, lambda x: x[ah_fields.WHO_ID])
     for whoid_group in grouped_by_whoid:
@@ -139,11 +131,11 @@ def convert_activity_histories(sf_connection, start_date):
         for created_date_group in grouped_by_created_date:
             grouped_by_subject = _group_records_by_subject(created_date_group)
             for subject_group in grouped_by_subject:
-                if not subject_group: # TODO handle upstream
+                if not subject_group: # TODO handle upstream (Desc != NULL?)
                     continue
-                # assuming longest email in a group with matching Subject
-                # fields contains whole of transaction
-                # from that day, upload as Contact Note
+                # where multiple matching Subjects from a given day and Contact,
+                # assume the longest email contains all preceeding replies
+                # in its body, and upload that as representative of the chain
                 longest = max(
                     subject_group, key=lambda x: len(x[ah_fields.DESCRIPTION])
                 )
@@ -179,12 +171,10 @@ def _map_ah_to_contact_note(ah_record_dict):
     :rtype: dict
     """
     ah_id = ah_record_dict[ah_fields.ID]
-    #description = ah_record_dict[ah_fields.DESCRIPTION][:100] # XXX dev
     # strip out instances of >2 '\n' in a row for nicer formatting
     description = NEWLINE_RE.sub(
         "\n", ah_record_dict[ah_fields.DESCRIPTION]
     )
-    # escape apostrophes for SF query
     cn_dict = {
         cn_fields.MODE_OF_COMMUNICATION: "Email",
         cn_fields.CONTACT: ah_record_dict[ah_fields.WHO_ID],
@@ -198,28 +188,86 @@ def _map_ah_to_contact_note(ah_record_dict):
     return cn_dict
 
 
-def convert_events():
+def _map_event_to_contact_note(event_record_dict):
+    """From a dict of Event data, create a dict of args for a (new)
+    Contact Note.
+
+    Does some cleaning of the data as well:
+        - replace \n(\n)+ with \n in the Description/Comments__c field to
+          cut out large swaths of empty space
+
+    TODO: Roll together with other mapping function(s).
+
+    :param event_record_dict: dict of Event data, expecting the below
+        key names and value types:
+            event_fields.ID: str
+            event_fields.WHO_ID: str
+            event_fields.SUBJECT: str
+            event_fields.DESCRIPTION: str
+            event_fields.START_DATETIME: str
+    :return: dict of Contact Note data, keyed by Salesforce API names
+    :rtype: dict
+    """
+    event_id = event_record_dict[event_fields.ID]
+    # where empty Descriptions come back as None type, use string 'None'
+    description = str(event_record_dict[event_fields.DESCRIPTION])
+    # strip out instances of >2 '\n' in a row for nicer formatting
+    description = NEWLINE_RE.sub("\n", description)
+    cn_dict = {
+        cn_fields.CONTACT: event_record_dict[event_fields.WHO_ID],
+        cn_fields.SUBJECT: event_record_dict[event_fields.SUBJECT],
+        # Contact Note just needs YYYY-MM-DD
+        cn_fields.DATE_OF_CONTACT: event_record_dict[event_fields.START_DATETIME][:10],
+        cn_fields.COMMENTS:\
+            f"{description}\n\n///Created from Event {event_id}"
+    }
+
+    return cn_dict
+
+
+def convert_events(sf_connection, start_datestr):
     """Make Contact Note objects from recent Event objects.
 
-    ...
+    Uses CREATED_DATE to pull recent Event objects, but Date of Contact
+    set to the Event's StartDateTime. Checks for existing Contact Note, and
+    won't create new if one is found.
 
+    :param sf_connection: ``simple_salesforce.Salesforce`` connection
+    :param start_date: str earliest (created) date from which to convert
+        objects, in SALESFORCE_DATETIME_FORMAT (%Y-%m-%dT%H:%M:%S.%f%z)
+    :return: None
+    :rtype: None
     """
-    pass
     events_query = (
         f"SELECT {event_fields.ID} "
-        f",{event_fields.OWNER_ID} " # Rowe-Clark Coordinator; Event.Assigned To
-        f",{event_fields.WHO_ID} " # Contact (alum) SFID; Event.Name; --> Contact__c
+        f",{event_fields.WHO_ID} " # --> Contact__c
         f",{event_fields.SUBJECT} " # --> Subject__c
         f",{event_fields.DESCRIPTION} " # --> Comments__c
         f",{event_fields.START_DATETIME} " # --> Date_of_Contact__c
         f"FROM {event_fields.API_NAME} "
-        f"WHERE OwnerId = '{AC_ID}' " # Rowe-Clark Coordinator
+        f"WHERE {event_fields.CREATED_DATE} >= {start_datestr} "
+        #f"WHERE {event_fields.CREATED_DATE} >= 2014-01-01T00:00:00+0000 "
+        #f"AND {event_fields.CREATED_DATE} < 2015-01-01T00:00:00+0000 "
+        f"AND {event_fields.WHO_ID} != NULL "
+        f"AND OwnerId = '{AC_ID}' "
     )
 
+    event_ids = []
+    resulting_notes = []
+    events = salesforce_gen(sf_connection, events_query)
+    for event in events:
+        event_ids.append({"Id": event[event_fields.ID]})
+        prepped = _map_event_to_contact_note(event)
+        #print(prepped, "\n") # XXX dev
+        result_dict = get_or_create_contact_note(sf_connection, prepped)
+        # TODO roll into get_or_create
+        if result_dict[SUCCESS]:
+            result_dict[CREATED] = True
+        else:
+            result_dict[CREATED] = False
+        resulting_notes.append(result_dict)
 
-    # prep_for_sf ... description could be None
-
-
+    _log_results("Event", resulting_notes, event_ids)
 
 
 def _group_records(records_list, key_func):
@@ -288,100 +336,6 @@ def _group_records_by_subject(records_list):
     return all_groups
 
 
-
-def upload_contact_notes(infile_path, output_dir, sandbox=False):
-    """Creates Contact Notes from Comer where necessary, and saves a report
-    file matching Noble's Contact Note SF ID to Comer's.
-
-    Checks if a note already exists at Noble, and if so, adds the existing
-    Noble SF ID to the report, for Comer to sync in their SF instance.
-
-    :pararm infile_path: str path to the input file
-    :param output_dir: str path to the directory in which output file is saved
-    :param sandbox: (optional) bool whether or not to use the sandbox
-        Salesforce instance
-    :return: path to the created csv report file
-    :rtype: str
-    """
-    global sf_connection
-    sf_connection = get_salesforce_connection(sandbox=sandbox)
-    job_name = __file__.split(path.sep)[-1]
-    hostname = SF_LOG_SANDBOX if sandbox else SF_LOG_LIVE
-    global logger
-    logger = get_logger(job_name, hostname=hostname)
-
-    for_bulk_create = []
-
-    with open(infile_path, "r") as infile:
-        reader = csv.DictReader(infile)
-
-        for row in reader:
-            # standard with exported Salesforce reports, expecting a blank row
-            # after the data before footer metadata rows
-            if _is_blank_row(row):
-                break
-
-            # likely means it's a GCYC alum
-            if not row[NOBLE_CONTACT_SF_ID]:
-                continue
-
-            # utmostu grade point calculator notes uploaded without a date of
-            # contact; skip
-            if not row[DATE_OF_CONTACT]:
-                continue
-
-            if not row[NOBLE_CONTACT_NOTE_SF_ID]:
-                for_bulk_create.append(row)
-
-    created_results = _create_contact_notes(for_bulk_create)
-    report_path = _save_created_report(
-        created_results, output_dir, for_bulk_create
-    )
-
-    return report_path
-
-
-def _save_created_report(results_list, output_dir, args_dicts):
-    """Save a csv report of newly-created Contact Notes to send to Comer.
-
-    Also saves reference to found duplicates, in case the reference isn't
-    present in Comer's Salesforce.
-
-    :param results_list: list of result dicts
-    :param output_dir: str path to directory where to save report file
-    :param args_dicts: iterable of original args_dicts, to pull college SF ID
-    :return: None
-    """
-    now_datetime = datetime.now().strftime(OUTFILE_DATESTR_FORMAT)
-    filename = f"New_Noble_Contact_Notes_{now_datetime}.csv"
-    file_path = path.join(output_dir, filename)
-
-    report_headers = (
-        NOBLE_CONTACT_NOTE_SF_ID,
-        COMER_CONTACT_NOTE_SF_ID,
-    )
-
-    if results_list:
-        headers = report_headers
-        with open(file_path, "w") as fhand:
-            writer = csv.DictWriter(
-                fhand, fieldnames=headers, extrasaction="ignore"
-            )
-            writer.writeheader()
-            for result, args_dict in zip(results_list, args_dicts):
-                # mapping back from Salesforce to source headers for Comer
-                result[NOBLE_CONTACT_NOTE_SF_ID] = result[ID_RESULT]
-                writer.writerow(result)
-    else:
-        with open(file_path, "w") as fhand:
-            writer = csv.Writer(fhand)
-            writer.writerow("No new Noble Contact Note objects saved.")
-
-    logger.info(f"Saved new Noble Contact Notes report to {file_path}")
-
-    return file_path
-
-
 def _log_results(original_object_name, results_list, original_data):
     """Log results from Contact Note create action.
 
@@ -410,8 +364,8 @@ def _log_results(original_object_name, results_list, original_data):
             fail_count += 1
             log_payload = {
                 "from_object": original_object_name,
-                ID_RESULT: result[ID_RESULT],
-                ERRORS: result[ERRORS],
+                "id": result["id"],
+                "errors": result["errors"],
                 "arguments": args_dict,
             }
             logger.warn(f"Possible duplicate Contact Note: {log_payload}")
@@ -427,71 +381,6 @@ def _log_results(original_object_name, results_list, original_data):
         f"{attempted} attempted, {success_count} succeeded, "
         f"{fail_count} failed."
     )
-
-
-def _prep_row_for_salesforce(row_dict):
-    """Change keys in row_dict to Salesforce API field names, and convert
-    data where necessary.
-
-    Changes keys in the row_dict to Salesforce API fieldnames, filtering out
-    irrelevant keys (ie. those outside of the FIELD_CONVERSIONS lookup).
-    After converting the keys, prepares row for simple_salesforce api:
-        - converts source datetime str to Salesforce-ready
-        - converts checkbox bools to python bools
-        - insert a default Subject where source is blank
-
-    :param row_dict: dict row of Contact Note data
-    :return: new dict ready for Salesforce bulk action
-    :rtype: dict
-    """
-    # maps input headers to Salesforce field API names
-    FIELD_CONVERSIONS = {
-        NOBLE_CONTACT_SF_ID: contact_note_fields.CONTACT,
-        COMMENTS: contact_note_fields.COMMENTS,
-        COMM_STATUS: contact_note_fields.COMMUNICATION_STATUS,
-        DATE_OF_CONTACT: contact_note_fields.DATE_OF_CONTACT,
-        DISCUSSION_CATEGORY: contact_note_fields.DISCUSSION_CATEGORY,
-        INITIATED_BY_ALUM: contact_note_fields.INITIATED_BY_ALUM,
-        MODE: contact_note_fields.MODE_OF_COMMUNICATION,
-        SUBJECT: contact_note_fields.SUBJECT,
-    }
-
-    new_dict = dict()
-    for source_header, api_name in FIELD_CONVERSIONS.items():
-        datum = row_dict.get(source_header, None)
-        if datum:
-            new_dict[api_name] = datum
-
-    # Subject is required
-    DEFAULT_SUBJECT = "(note from spreadsheet)"
-    source_subject = new_dict.get(contact_note_fields.SUBJECT, None)
-    if not source_subject:
-        new_dict[contact_note_fields.SUBJECT] = DEFAULT_SUBJECT
-
-    # convert DATE_OF_CONTACT to salesforce-ready datestr
-    source_datestr = new_dict.get(contact_note_fields.DATE_OF_CONTACT, None)
-    if source_datestr:
-        salesforce_datestr = make_salesforce_datestr(
-            source_datestr, SOURCE_DATESTR_FORMAT
-        )
-        new_dict[contact_note_fields.DATE_OF_CONTACT] = salesforce_datestr
-
-    # INITIATED_BY_ALUM comes as str '1' or '0' (checkbox in Salesforce);
-    # convert to explicit bool for simple_salesforce api
-    source_initiated = new_dict.get(contact_note_fields.INITIATED_BY_ALUM, '0')
-    initiated_bool = bool(int(source_initiated))
-    new_dict[contact_note_fields.INITIATED_BY_ALUM] = initiated_bool
-
-    return new_dict
-
-
-def _is_blank_row(row_dict):
-    """Checks if row is blank, signaling end of data in spreadsheet.
-
-    Reports from Salesforce are generated with footer rows at the end,
-    separated from the actual report data by one blank row.
-    """
-    return all(v == "" for v in row_dict.values())
 
 
 if __name__ == "__main__":
