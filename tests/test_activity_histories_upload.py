@@ -3,63 +3,83 @@ test_activity_histories_upload.py
 """
 
 from collections import OrderedDict
-from unittest import mock
+from unittest.mock import (
+    MagicMock,
+    Mock,
+)
 
 import pytest
-#from simple_salesforce import Salesforce
+from simple_salesforce import Salesforce
 
 from convert_activity_histories import (
+    convert_activity_histories,
+    convert_events,
     _group_records,
     _group_records_by_subject,
 )
 from salesforce_fields import activity_history as ah_fields
 
 
-NUMBER_OF_RECORDS = 5
+START_DATE_FOR_TEST = "2017-12-07T00:00:00+0000"
 
-# OrderedDicts are expected type
+# returned type OrderedDicts; nested to match simple_salesforce.query result
 ungrouped_record_dicts = [
     OrderedDict([
-        ("Subject", "← Email: Recommendations"),
-        ("WhoId", "abc123"),
-        ("CreatedDate", "2017-12-01"),
+        ("Subject", "← Email: Scholarship question"),
+        ("Description", "nineteen characters"),
+        ("WhoId", "def456"),
+        ("CreatedDate", "2017-12-02"),
     ]),
     OrderedDict([
-        ("Subject", "← Email: Scholarship question"),
-        ("WhoId", "def456"),
-        ("CreatedDate", "2017-11-01"),
+        ("Subject", "← Email: Recommendations"),
+        ("Description", "shorter description"),
+        ("WhoId", "abc123"),
+        ("CreatedDate", "2017-12-05"),
     ]),
     OrderedDict([
         ("Subject", "← Email: Re: Recommendations"),
+        ("Description",
+         "the longer of the two descriptions\n\n\nwith matching subjects"),
         ("WhoId", "abc123"),
-        ("CreatedDate", "2017-12-01"),
+        ("CreatedDate", "2017-12-05"),
     ]),
 ]
+salesforce_ah_results = OrderedDict([
+    ("totalSize", 3),
+    ("done", True),
+    ("records", [
+        OrderedDict([
+            ("ActivityHistories",
+                OrderedDict([
+                    ("records", ungrouped_record_dicts),
+                ]),
+            ),
+        ]),
+    ]),
+])
+
+
+#no_dupe_found = {
+#    "totalSize": 0,
+#    "done": True,
+#    "records": [],
+#}
+created_result = {
+    "id": "new567",
+    "success": True,
+    "errors": [],
+}
+
+MockConnection = MagicMock(spec=Salesforce)
+MockConnection.Contact_Note__c = Mock()
 
 @pytest.fixture()
-def mock_connection():
-    MockConnection = mock.create_autospec(Salesforce)
+def mock_sf_connection_for_ah():
 
-    first_results = {
-        "totalSize": NUMBER_OF_RECORDS,
-        "done": False,
-        "nextRecordsUrl": "https://ne.xt",
-        "records": [1, 2, 3],
-    }
-    last_results = {
-        "totalSize": NUMBER_OF_RECORDS,
-        "done": True,
-        "nextRecordsUrl": "",
-        "records": [4, 5],
-    }
-
-    # test the test
-    assert NUMBER_OF_RECORDS == \
-        len(first_results["records"]) + len(last_results["records"])
-
-    MockConnection().query.return_value = first_results
-    MockConnection().query_more.return_value = last_results
-
+    MockConnection.query = MagicMock(return_value=salesforce_ah_results)
+    MockConnection.Contact_Note__c.create = MagicMock(
+        return_value=created_result
+    )
     return MockConnection()
 
 
@@ -108,8 +128,34 @@ class TestActivityHistoryUpload():
 
         for group in grouped_dicts:
             if len(group) == 1:
-                assert key_func(group[0]) == "2017-11-01"
+                assert key_func(group[0]) == "2017-12-02"
             elif len(group) == 2:
-                assert key_func(group[0]) == "2017-12-01"
+                assert key_func(group[0]) == "2017-12-05"
             else:
                 pytest.fail("Response dicts not properly grouped by CreatedDate")
+
+
+    def test_convert_activity_histories(self, mock_sf_connection_for_ah):
+        convert_activity_histories(
+            mock_sf_connection_for_ah, START_DATE_FOR_TEST
+        )
+        mock_sf_connection_for_ah.query.assert_called()
+        mock_sf_connection_for_ah.Contact_Note__c.assert_any_call({
+            cn_fields.MODE_OF_COMMUNICATION: "Email",
+            cn_fields.CONTACT: "abc123",
+            cn_fields.SUBJECT: "← Email: Re: Recommendations",
+            cn_fields.DATE_OF_CONTACT: "2017-12-05",
+            cn_fields.COMMENTS:\
+                "the longer of the two descriptions\nwith matching subjects",
+        })
+        mock_sf_connection_for_ah.Contact_Note__c.assert_any_call({
+            cn_fields.MODE_OF_COMMUNICATION: "Email",
+            cn_fields.CONTACT: "def456",
+            cn_fields.SUBJECT: "← Email: Scholarship question",
+            cn_fields.DATE_OF_CONTACT: "2017-12-02",
+            cn_fields.COMMENTS: "shorter description",
+        })
+
+
+    def test_convert_events(self):
+        assert 0
