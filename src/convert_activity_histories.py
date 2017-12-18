@@ -141,7 +141,6 @@ def convert_activity_histories(sf_connection, start_date):
                 )
                 ah_ids.append({"Id": longest[ah_fields.ID]})
                 prepped = _map_ah_to_contact_note(longest)
-                #pprint(prepped)
                 result_dict = get_or_create_contact_note(sf_connection, prepped)
                 if result_dict[SUCCESS]:
                     result_dict[CREATED] = True
@@ -258,7 +257,6 @@ def convert_events(sf_connection, start_datestr):
     for event in events:
         event_ids.append({"Id": event[event_fields.ID]})
         prepped = _map_event_to_contact_note(event)
-        #print(prepped, "\n") # XXX dev
         result_dict = get_or_create_contact_note(sf_connection, prepped)
         # TODO roll into get_or_create
         if result_dict[SUCCESS]:
