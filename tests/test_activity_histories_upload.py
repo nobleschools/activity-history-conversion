@@ -18,25 +18,29 @@ from convert_activity_histories import (
     _group_records_by_subject,
 )
 from salesforce_fields import activity_history as ah_fields
+import salesforce_utils
 
 
-START_DATE_FOR_TEST = "2017-12-07T00:00:00+0000"
+START_DATE_FOR_TEST = "2017-12-02T00:00:00+0000"
 
 # returned type OrderedDicts; nested to match simple_salesforce.query result
 ungrouped_record_dicts = [
     OrderedDict([
+        ("Id", "ActivityHistory1"),
         ("Subject", "← Email: Scholarship question"),
         ("Description", "nineteen characters"),
         ("WhoId", "def456"),
         ("CreatedDate", "2017-12-02"),
     ]),
     OrderedDict([
+        ("Id", "ActivityHistory2"),
         ("Subject", "← Email: Recommendations"),
         ("Description", "shorter description"),
         ("WhoId", "abc123"),
         ("CreatedDate", "2017-12-05"),
     ]),
     OrderedDict([
+        ("Id", "ActivityHistory3"),
         ("Subject", "← Email: Re: Recommendations"),
         ("Description",
          "the longer of the two descriptions\n\n\nwith matching subjects"),
@@ -45,14 +49,12 @@ ungrouped_record_dicts = [
     ]),
 ]
 salesforce_ah_results = OrderedDict([
-    ("totalSize", 3),
+    ("totalSize", 1),
     ("done", True),
     ("records", [
         OrderedDict([
             ("ActivityHistories",
-                OrderedDict([
-                    ("records", ungrouped_record_dicts),
-                ]),
+              OrderedDict([("records", ungrouped_record_dicts)]),
             ),
         ]),
     ]),
@@ -74,13 +76,13 @@ MockConnection = MagicMock(spec=Salesforce)
 MockConnection.Contact_Note__c = Mock()
 
 @pytest.fixture()
-def mock_sf_connection_for_ah():
+def mock_salesforce_for_ah():
 
-    MockConnection.query = MagicMock(return_value=salesforce_ah_results)
+    #MockConnection.query = MagicMock(return_value=salesforce_ah_results)
     MockConnection.Contact_Note__c.create = MagicMock(
         return_value=created_result
     )
-    return MockConnection()
+    return MockConnection
 
 
 class TestActivityHistoryUpload():
@@ -135,12 +137,17 @@ class TestActivityHistoryUpload():
                 pytest.fail("Response dicts not properly grouped by CreatedDate")
 
 
-    def test_convert_activity_histories(self, mock_sf_connection_for_ah):
-        convert_activity_histories(
-            mock_sf_connection_for_ah, START_DATE_FOR_TEST
+    def test_convert_activity_histories(self, monkeypatch, mock_salesforce_for_ah):
+
+        monkeypatch.setattr(
+            salesforce_utils, "salesforce_gen",
+            salesforce_ah_results["records"]
         )
-        mock_sf_connection_for_ah.query.assert_called()
-        mock_sf_connection_for_ah.Contact_Note__c.assert_any_call({
+        convert_activity_histories(
+            mock_salesforce_for_ah, START_DATE_FOR_TEST
+        )
+        mock_salesforce_for_ah.query.assert_called()
+        mock_salesforce_for_ah.Contact_Note__c.create.assert_any_call({
             cn_fields.MODE_OF_COMMUNICATION: "Email",
             cn_fields.CONTACT: "abc123",
             cn_fields.SUBJECT: "← Email: Re: Recommendations",
@@ -148,7 +155,7 @@ class TestActivityHistoryUpload():
             cn_fields.COMMENTS:\
                 "the longer of the two descriptions\nwith matching subjects",
         })
-        mock_sf_connection_for_ah.Contact_Note__c.assert_any_call({
+        mock_salesforce_for_ah.Contact_Note__c.create.assert_any_call({
             cn_fields.MODE_OF_COMMUNICATION: "Email",
             cn_fields.CONTACT: "def456",
             cn_fields.SUBJECT: "← Email: Scholarship question",

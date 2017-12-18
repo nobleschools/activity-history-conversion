@@ -1,5 +1,7 @@
 """
 conftest.py
+
+Disable requests.request and logging.
 """
 
 import logging
@@ -17,5 +19,3 @@ def no_requests(monkeypatch):
 @pytest.fixture(scope="session", autouse=True)
 def no_logging():
     logging.disable(logging.CRITICAL)
-    yield
-    logging.disable(logging.NOTSET)
