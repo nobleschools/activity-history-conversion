@@ -36,8 +36,6 @@ from noble_logging_utils.papertrail_logger import (
     SF_LOG_SANDBOX,
 )
 
-from pprint import pprint # XXX dev
-
 
 DAYS_BACK = 1 # convert objects from last DAYS_BACK days
 
@@ -245,8 +243,6 @@ def convert_events(sf_connection, start_datestr):
         f",{event_fields.START_DATETIME} " # --> Date_of_Contact__c
         f"FROM {event_fields.API_NAME} "
         f"WHERE {event_fields.CREATED_DATE} >= {start_datestr} "
-        #f"WHERE {event_fields.CREATED_DATE} >= 2014-01-01T00:00:00+0000 "
-        #f"AND {event_fields.CREATED_DATE} < 2015-01-01T00:00:00+0000 "
         f"AND {event_fields.WHO_ID} != NULL "
         f"AND OwnerId = '{AC_ID}' "
     )
