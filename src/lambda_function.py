@@ -11,7 +11,7 @@ import urllib
 
 import boto3
 
-from src import convert_activity_histories
+from src import convert_ah_and_events_to_contact_notes
 
 
 # decrypt env vars once here so they're available to subsequent lambda
@@ -38,22 +38,7 @@ def lambda_handler(event, context):
     :param event: dict AWS event source dict
     :param context: LambdaContext object
     """
-    pass
-
-
-def push_to_s3(file_path, bucket_name):
-    """Push the file at file_path to the s3 bucket_name.
-
-    :param file_path: str path to file to be uploaded (should be in /tmp/)
-    :param bucket_name: str name of bucket to push file to
-    :return: None
-    :rtype: None
-    """
-    file_name = file_path.split("/")[-1]
-    s3 = boto3.resource("s3")
-    bucket = s3.Bucket(bucket_name)
-    file_dest = os.path.join(REPORTS_DIR, file_name)
-    bucket.upload_file(Key=file_dest, Filename=file_path)
+    convert_ah_and_events_to_contact_notes()
 
 
 if __name__ == "__main__":
