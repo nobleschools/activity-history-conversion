@@ -1,8 +1,8 @@
 """
 activity_history_conversion/src/lambda_function.py
 
-Lambda wrapper for convert_activity_histories. Creates Contact Notes from
-Activity History and Event Salesforce objects.
+Lambda wrapper for convert_ah_and_events_to_contact_notes.
+Creates Contact Notes from Activity History and Event Salesforce objects.
 """
 
 from base64 import urlsafe_b64decode
@@ -10,6 +10,7 @@ import os
 import urllib
 
 import boto3
+import rollbar
 
 from src import convert_ah_and_events_to_contact_notes
 
@@ -21,6 +22,7 @@ env_vars = (
     "PAPERTRAIL_PORT",
     "SF_LIVE_PASSWORD",
     "SF_LIVE_TOKEN",
+    "ROLLBAR_TOKEN",
 )
 
 for var in env_vars:
@@ -30,10 +32,13 @@ for var in env_vars:
     )["Plaintext"]
     os.environ[var] = decrypted.decode()
 
+rollbar.init(os.environ["ROLLBAR_TOKEN"], "production")
 
+
+@rollbar.lambda_function
 def lambda_handler(event, context):
     """
-    ...
+    Call Activity History and Event to Contact Note job.
 
     :param event: dict AWS event source dict
     :param context: LambdaContext object

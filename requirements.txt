@@ -1,4 +1,4 @@
--e git+https://github.com/NobleNetworkCharterSchools/activity-history-conversion.git@85e3025cd1a289b5cbb7930d3d8a1df789a57857#egg=activity_history_conversion
+-e git+https://github.com/NobleNetworkCharterSchools/activity-history-conversion.git@b547d82c0b381dea32c9546b7739c4114e0dba1c#egg=activity_history_conversion
 asn1crypto==0.23.0
 attrs==17.3.0
 certifi==2017.11.5
@@ -16,6 +16,7 @@ pytest==3.3.0
 python-Levenshtein==0.12.0
 pytz==2017.3
 requests==2.18.4
+rollbar==0.13.17
 salesforce-utils==0.1
 simple-salesforce==0.73.0
 six==1.11.0
