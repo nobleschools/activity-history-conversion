@@ -25,7 +25,6 @@ from salesforce_utils import (
     salesforce_gen,
 )
 from salesforce_utils.constants import (
-        AC_LOOKUP,
         CAMPUS_SF_IDS,
         ROWECLARK,
         SALESFORCE_DATETIME_FORMAT,
@@ -37,10 +36,10 @@ from noble_logging_utils.papertrail_logger import (
 )
 
 
-DAYS_BACK = 1 # convert objects from last DAYS_BACK days
+DAYS_BACK = 2 # convert objects from last DAYS_BACK days
 
 ROWECLARK_ACCOUNT_ID = CAMPUS_SF_IDS[ROWECLARK]
-AC_ID = AC_LOOKUP["rc"][0] # Rowe-Clark Coordinator
+AC_ID = "005E0000001e8pNIAQ" # 'rc' account alias
 
 # simple_salesforce.Salesfoce.bulk operation result keys
 SUCCESS = "success" # :bool
@@ -78,7 +77,6 @@ def convert_ah_and_events_to_contact_notes(sandbox=False):
 
     convert_activity_histories(sf_connection, start_datestr)
     convert_events(sf_connection, start_datestr)
-
 
 
 def convert_activity_histories(sf_connection, start_date):
@@ -131,6 +129,7 @@ def convert_activity_histories(sf_connection, start_date):
             for subject_group in grouped_by_subject:
                 if not subject_group: # TODO handle upstream (Desc != NULL?)
                     continue
+
                 # where multiple matching Subjects from a given day and Contact,
                 # assume the longest email contains all preceeding replies
                 # in its body, and upload that as representative of the chain
