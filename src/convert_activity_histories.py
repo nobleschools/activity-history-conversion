@@ -29,7 +29,7 @@ from salesforce_utils.constants import (
         ROWECLARK,
         SALESFORCE_DATETIME_FORMAT,
 )
-from noble_logging_utils.papertrail_logger import (
+from noble_logging_utils.papertrail_struct_logger import (
     get_logger,
     SF_LOG_LIVE,
     SF_LOG_SANDBOX,
@@ -69,6 +69,8 @@ def convert_ah_and_events_to_contact_notes(sandbox=False):
     job_name = __file__.split(path.sep)[-1]
     system_name = SF_LOG_SANDBOX if sandbox else SF_LOG_LIVE
     logger = get_logger(job_name, hostname=system_name)
+    logger = logger.bind(event="convert_ah_and_events_to_contact_notes")
+    logger._logger.setLevel("DEBUG")
 
     today = datetime.today()
     today_utc = today.astimezone(pytz.utc)
@@ -347,33 +349,23 @@ def _log_results(original_object_name, results_list, original_data):
     :param original_data: list of original data dicts from the input file
     :rtype: None
     """
-    logger.info(
-        f"Logging results of {original_object_name} to Contact Note conversion.."
-    )
     attempted = success_count = fail_count = 0
     for result, args_dict in zip(results_list, original_data):
         attempted += 1
         if not result[SUCCESS]:
             fail_count += 1
-            log_payload = {
-                "from_object": original_object_name,
-                "id": result["id"],
-                "errors": result["errors"],
-                "arguments": args_dict,
-            }
-            logger.warn(f"Possible duplicate Contact Note: {log_payload}")
+            logger.warn(
+                from_object=original_object_name,
+                id=result["id"],
+                errors=result["errors"],
+                arguments=args_dict,
+                success=False,
+            )
         else:
             success_count += 1
-            logger.info(
-                f"Contact Note {result['id']} created from "
-                f"{original_object_name} {args_dict['Id']}"
-            )
+            logger.info(success=True, object_type=original_object_name, created_id=result["id"], source_object=args_dict["Id"])
 
-    logger.info(
-        f"{original_object_name} to Contact Note conversion: "
-        f"{attempted} attempted, {success_count} succeeded, "
-        f"{fail_count} failed."
-    )
+    logger.info(object_type=original_object_name, attempted=attempted, created=success_count, failed=fail_count)
 
 
 if __name__ == "__main__":
