@@ -8,6 +8,7 @@ cryptography==2.3
 elasticsearch==5.3.0
 fuzzywuzzy==0.15.1
 idna==2.6
+git+https://github.com/noblenetworkcharterschools/noble-logging-utils.git@5624d5dadc594e803a674ae1fdbd71ecd2a999ae#egg=noble_logging_utils
 pluggy==0.6.0
 py==1.5.2
 pycparser==2.18
