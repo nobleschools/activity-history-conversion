@@ -7,7 +7,6 @@ Creates Contact Notes from Activity History and Event Salesforce objects.
 
 from base64 import urlsafe_b64decode
 import os
-import urllib
 
 import boto3
 import rollbar
@@ -37,8 +36,7 @@ rollbar.init(os.environ["ROLLBAR_TOKEN"], "production")
 
 @rollbar.lambda_function
 def lambda_handler(event, context):
-    """
-    Call Activity History and Event to Contact Note job.
+    """Call Activity History and Event to Contact Note job.
 
     :param event: dict AWS event source dict
     :param context: LambdaContext object
