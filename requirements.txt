@@ -10,7 +10,7 @@ fuzzywuzzy==0.15.1
 idna==2.6
 git+https://github.com/noblenetworkcharterschools/noble-logging-utils.git@5624d5dadc594e803a674ae1fdbd71ecd2a999ae#egg=noble_logging_utils
 pluggy==0.6.0
-py==1.5.2
+py==1.10.0
 pycparser==2.18
 pyOpenSSL==17.5.0
 pytest==3.3.0
